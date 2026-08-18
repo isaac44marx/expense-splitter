@@ -4,6 +4,9 @@ import com.expensesplitter.dto.request.CreateExpenseRequest;
 import com.expensesplitter.dto.request.ExpenseShareRequest;
 import com.expensesplitter.dto.response.ExpenseResponse;
 import com.expensesplitter.dto.response.ExpenseShareResponse;
+import com.expensesplitter.dto.response.GroupBalancesResponse;
+import com.expensesplitter.dto.response.MemberBalanceResponse;
+import com.expensesplitter.dto.response.SettlementResponse;
 import com.expensesplitter.entity.Expense;
 import com.expensesplitter.entity.ExpenseShare;
 import com.expensesplitter.exception.ResourceNotFoundException;
@@ -16,11 +19,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -118,6 +124,74 @@ public class ExpenseService {
         return expenses.stream()
                 .map(expense -> ExpenseResponse.from(expense, sharesByExpenseId.getOrDefault(expense.getId(), List.of())))
                 .toList();
+    }
+
+    public GroupBalancesResponse getBalances(Long groupId) {
+        if (!groupRepository.existsById(groupId)) {
+            throw new ResourceNotFoundException("Group " + groupId + " not found");
+        }
+
+        List<Long> memberUserIds = groupMemberRepository.findByIdGroupId(groupId).stream()
+                .map(member -> member.getId().getUserId())
+                .toList();
+
+        List<Expense> expenses = expenseRepository.findByGroupId(groupId);
+        List<Long> expenseIds = expenses.stream().map(Expense::getId).toList();
+        List<ExpenseShare> shares = expenseShareRepository.findByExpenseIdIn(expenseIds);
+
+        Map<Long, BigDecimal> netBalanceByUserId = new TreeMap<>();
+        for (Long userId : memberUserIds) {
+            netBalanceByUserId.put(userId, BigDecimal.ZERO.setScale(2));
+        }
+        for (Expense expense : expenses) {
+            netBalanceByUserId.merge(expense.getPaidByUserId(), expense.getAmount(), BigDecimal::add);
+        }
+        for (ExpenseShare share : shares) {
+            netBalanceByUserId.merge(share.getUserId(), share.getShareAmount().negate(), BigDecimal::add);
+        }
+
+        List<MemberBalanceResponse> balances = netBalanceByUserId.entrySet().stream()
+                .map(entry -> MemberBalanceResponse.from(entry.getKey(), entry.getValue()))
+                .toList();
+
+        return GroupBalancesResponse.from(balances, settleUp(netBalanceByUserId));
+    }
+
+    private List<SettlementResponse> settleUp(Map<Long, BigDecimal> netBalanceByUserId) {
+        List<Map.Entry<Long, BigDecimal>> creditors = new ArrayList<>();
+        List<Map.Entry<Long, BigDecimal>> debtors = new ArrayList<>();
+        for (Map.Entry<Long, BigDecimal> entry : netBalanceByUserId.entrySet()) {
+            int comparison = entry.getValue().compareTo(BigDecimal.ZERO);
+            if (comparison > 0) {
+                creditors.add(new AbstractMap.SimpleEntry<>(entry.getKey(), entry.getValue()));
+            } else if (comparison < 0) {
+                debtors.add(new AbstractMap.SimpleEntry<>(entry.getKey(), entry.getValue().negate()));
+            }
+        }
+        creditors.sort((a, b) -> b.getValue().compareTo(a.getValue()));
+        debtors.sort((a, b) -> b.getValue().compareTo(a.getValue()));
+
+        List<SettlementResponse> settlements = new ArrayList<>();
+        int i = 0;
+        int j = 0;
+        while (i < creditors.size() && j < debtors.size()) {
+            Map.Entry<Long, BigDecimal> creditor = creditors.get(i);
+            Map.Entry<Long, BigDecimal> debtor = debtors.get(j);
+            BigDecimal amount = creditor.getValue().min(debtor.getValue());
+
+            settlements.add(SettlementResponse.from(debtor.getKey(), creditor.getKey(), amount));
+
+            creditor.setValue(creditor.getValue().subtract(amount));
+            debtor.setValue(debtor.getValue().subtract(amount));
+
+            if (creditor.getValue().compareTo(BigDecimal.ZERO) == 0) {
+                i++;
+            }
+            if (debtor.getValue().compareTo(BigDecimal.ZERO) == 0) {
+                j++;
+            }
+        }
+        return settlements;
     }
 
 }

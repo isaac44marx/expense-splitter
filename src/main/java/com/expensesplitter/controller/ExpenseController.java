@@ -2,6 +2,7 @@ package com.expensesplitter.controller;
 
 import com.expensesplitter.dto.request.CreateExpenseRequest;
 import com.expensesplitter.dto.response.ExpenseResponse;
+import com.expensesplitter.dto.response.GroupBalancesResponse;
 import com.expensesplitter.service.ExpenseService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -35,8 +36,8 @@ public class ExpenseController {
     }
 
     @GetMapping("/groups/{groupId}/balances")
-    public ResponseEntity<Void> getBalances(@PathVariable Long groupId) {
-        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build();
+    public GroupBalancesResponse getBalances(@PathVariable Long groupId) {
+        return expenseService.getBalances(groupId);
     }
 
 }
