@@ -29,6 +29,9 @@ public class Group {
     @Column(nullable = false)
     private String name;
 
+    @Column(name = "created_by_user_id", nullable = false)
+    private Long createdByUserId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
