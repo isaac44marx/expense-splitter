@@ -1,0 +1,123 @@
+package com.expensesplitter.service;
+
+import com.expensesplitter.dto.request.CreateExpenseRequest;
+import com.expensesplitter.dto.request.ExpenseShareRequest;
+import com.expensesplitter.dto.response.ExpenseResponse;
+import com.expensesplitter.dto.response.ExpenseShareResponse;
+import com.expensesplitter.entity.Expense;
+import com.expensesplitter.entity.ExpenseShare;
+import com.expensesplitter.exception.ResourceNotFoundException;
+import com.expensesplitter.repository.ExpenseRepository;
+import com.expensesplitter.repository.ExpenseShareRepository;
+import com.expensesplitter.repository.GroupMemberRepository;
+import com.expensesplitter.repository.GroupRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class ExpenseService {
+
+    private final GroupRepository groupRepository;
+    private final GroupMemberRepository groupMemberRepository;
+    private final ExpenseRepository expenseRepository;
+    private final ExpenseShareRepository expenseShareRepository;
+
+    @Transactional
+    public ExpenseResponse createExpense(Long groupId, CreateExpenseRequest request) {
+        if (!groupRepository.existsById(groupId)) {
+            throw new ResourceNotFoundException("Group " + groupId + " not found");
+        }
+
+        Set<Long> seenShareUserIds = new HashSet<>();
+        Set<Long> duplicateShareUserIds = new LinkedHashSet<>();
+        for (ExpenseShareRequest share : request.getShares()) {
+            if (!seenShareUserIds.add(share.getUserId())) {
+                duplicateShareUserIds.add(share.getUserId());
+            }
+        }
+        if (!duplicateShareUserIds.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Duplicate userId(s) in shares: " + duplicateShareUserIds);
+        }
+
+        Set<Long> memberUserIds = groupMemberRepository.findByIdGroupId(groupId).stream()
+                .map(member -> member.getId().getUserId())
+                .collect(Collectors.toSet());
+
+        Set<Long> nonMemberUserIds = new LinkedHashSet<>();
+        if (!memberUserIds.contains(request.getPaidByUserId())) {
+            nonMemberUserIds.add(request.getPaidByUserId());
+        }
+        for (ExpenseShareRequest share : request.getShares()) {
+            if (!memberUserIds.contains(share.getUserId())) {
+                nonMemberUserIds.add(share.getUserId());
+            }
+        }
+        if (!nonMemberUserIds.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "User id(s) not a member of group " + groupId + ": " + nonMemberUserIds);
+        }
+
+        BigDecimal sharesTotal = request.getShares().stream()
+                .map(ExpenseShareRequest::getShareAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (sharesTotal.compareTo(request.getAmount()) != 0) {
+            throw new IllegalArgumentException(
+                    "Shares must sum to the expense amount: expected " + request.getAmount()
+                            + " but shares summed to " + sharesTotal);
+        }
+
+        Expense expense = new Expense();
+        expense.setGroupId(groupId);
+        expense.setPaidByUserId(request.getPaidByUserId());
+        expense.setAmount(request.getAmount());
+        expense.setDescription(request.getDescription());
+        Expense savedExpense = expenseRepository.save(expense);
+
+        List<ExpenseShare> shares = request.getShares().stream()
+                .map(shareRequest -> {
+                    ExpenseShare share = new ExpenseShare();
+                    share.setExpenseId(savedExpense.getId());
+                    share.setUserId(shareRequest.getUserId());
+                    share.setShareAmount(shareRequest.getShareAmount());
+                    return share;
+                })
+                .toList();
+        List<ExpenseShare> savedShares = expenseShareRepository.saveAll(shares);
+
+        List<ExpenseShareResponse> shareResponses = savedShares.stream()
+                .map(ExpenseShareResponse::from)
+                .toList();
+        return ExpenseResponse.from(savedExpense, shareResponses);
+    }
+
+    public List<ExpenseResponse> listExpenses(Long groupId) {
+        if (!groupRepository.existsById(groupId)) {
+            throw new ResourceNotFoundException("Group " + groupId + " not found");
+        }
+
+        List<Expense> expenses = expenseRepository.findByGroupId(groupId);
+        List<Long> expenseIds = expenses.stream().map(Expense::getId).toList();
+
+        Map<Long, List<ExpenseShareResponse>> sharesByExpenseId = expenseShareRepository.findByExpenseIdIn(expenseIds).stream()
+                .collect(Collectors.groupingBy(
+                        ExpenseShare::getExpenseId,
+                        Collectors.mapping(ExpenseShareResponse::from, Collectors.toList())
+                ));
+
+        return expenses.stream()
+                .map(expense -> ExpenseResponse.from(expense, sharesByExpenseId.getOrDefault(expense.getId(), List.of())))
+                .toList();
+    }
+
+}
